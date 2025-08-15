@@ -22,12 +22,12 @@ import (
 
 	"github.com/Microsoft/cosesign1go/pkg/cosesign1"
 	didx509resolver "github.com/Microsoft/didx509go/pkg/did-x509-resolver"
+	"github.com/Microsoft/hcsshim/internal/bridgeutils/gcserr"
 	"github.com/Microsoft/hcsshim/internal/debug"
-	"github.com/Microsoft/hcsshim/internal/guest/gcserr"
 	"github.com/Microsoft/hcsshim/internal/guest/policy"
 	"github.com/Microsoft/hcsshim/internal/guest/prot"
 	"github.com/Microsoft/hcsshim/internal/guest/runtime"
-	"github.com/Microsoft/hcsshim/internal/guest/spec"
+	specGuest "github.com/Microsoft/hcsshim/internal/guest/spec"
 	"github.com/Microsoft/hcsshim/internal/guest/stdio"
 	"github.com/Microsoft/hcsshim/internal/guest/storage"
 	"github.com/Microsoft/hcsshim/internal/guest/storage/overlay"
@@ -43,6 +43,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/verity"
 	"github.com/Microsoft/hcsshim/pkg/annotations"
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
+	cgroup1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	"github.com/mattn/go-shellwords"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -276,7 +277,7 @@ func (h *Host) AddContainer(id string, c *Container) error {
 }
 
 func setupSandboxMountsPath(id string) (err error) {
-	mountPath := spec.SandboxMountsDir(id)
+	mountPath := specGuest.SandboxMountsDir(id)
 	if err := os.MkdirAll(mountPath, 0755); err != nil {
 		return errors.Wrapf(err, "failed to create sandboxMounts dir in sandbox %v", id)
 	}
@@ -290,7 +291,7 @@ func setupSandboxMountsPath(id string) (err error) {
 }
 
 func setupSandboxHugePageMountsPath(id string) error {
-	mountPath := spec.HugePagesMountsDir(id)
+	mountPath := specGuest.HugePagesMountsDir(id)
 	if err := os.MkdirAll(mountPath, 0755); err != nil {
 		return errors.Wrapf(err, "failed to create hugepage Mounts dir in sandbox %v", id)
 	}
@@ -335,7 +336,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 		switch criType {
 		case "sandbox":
 			// Capture namespaceID if any because setupSandboxContainerSpec clears the Windows section.
-			namespaceID = getNetworkNamespaceID(settings.OCISpecification)
+			namespaceID = specGuest.GetNetworkNamespaceID(settings.OCISpecification)
 			err = setupSandboxContainerSpec(ctx, id, settings.OCISpecification)
 			if err != nil {
 				return nil, err
@@ -371,7 +372,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 			// set to "true", in which case all UVMs devices are added.
 			if len(h.securityPolicyEnforcer.EncodedSecurityPolicy()) > 0 && !oci.ParseAnnotationsBool(ctx,
 				settings.OCISpecification.Annotations, annotations.LCOWPrivileged, false) {
-				if err := addDevSev(ctx, settings.OCISpecification); err != nil {
+				if err := specGuest.AddDevSev(ctx, settings.OCISpecification); err != nil {
 					log.G(ctx).WithError(err).Debug("failed to add SEV device")
 				}
 			}
@@ -389,7 +390,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 		}
 	} else {
 		// Capture namespaceID if any because setupStandaloneContainerSpec clears the Windows section.
-		namespaceID = getNetworkNamespaceID(settings.OCISpecification)
+		namespaceID = specGuest.GetNetworkNamespaceID(settings.OCISpecification)
 		if err := setupStandaloneContainerSpec(ctx, id, settings.OCISpecification); err != nil {
 			return nil, err
 		}
@@ -564,7 +565,8 @@ func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *
 			if err != nil {
 				return err
 			}
-			if req.RequestType == guestrequest.RequestTypeAdd {
+			switch req.RequestType {
+			case guestrequest.RequestTypeAdd:
 				if err := h.hostMounts.AddRWDevice(mvd.MountPath, source, mvd.Encrypted); err != nil {
 					return err
 				}
@@ -573,7 +575,7 @@ func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *
 						_ = h.hostMounts.RemoveRWDevice(mvd.MountPath, source)
 					}
 				}()
-			} else if req.RequestType == guestrequest.RequestTypeRemove {
+			case guestrequest.RequestTypeRemove:
 				if err := h.hostMounts.RemoveRWDevice(mvd.MountPath, source); err != nil {
 					return err
 				}
@@ -817,24 +819,34 @@ func (h *Host) GetProperties(ctx context.Context, containerID string, query prot
 
 	properties := &prot.PropertiesV2{}
 	for _, requestedProperty := range query.PropertyTypes {
-		if requestedProperty == prot.PtProcessList {
+		switch requestedProperty {
+		case prot.PtProcessList:
 			pids, err := c.GetAllProcessPids(ctx)
 			if err != nil {
 				return nil, err
 			}
 			properties.ProcessList = make([]prot.ProcessDetails, len(pids))
 			for i, pid := range pids {
-				if outOfUint32Bounds(pid) {
+				if specGuest.OutOfUint32Bounds(pid) {
 					return nil, errors.Errorf("PID (%d) exceeds uint32 bounds", pid)
 				}
 				properties.ProcessList[i].ProcessID = uint32(pid)
 			}
-		} else if requestedProperty == prot.PtStatistics {
+		case prot.PtStatistics:
 			cgroupMetrics, err := c.GetStats(ctx)
 			if err != nil {
 				return nil, err
 			}
+			// zero out [Blkio] sections, since:
+			//  1. (Az)CRI (currently) only looks at the CPU and memory sections; and
+			//  2. it can get very large for containers with many layers
+			cgroupMetrics.Blkio.Reset()
+			// also preemptively zero out [Rdma] and [Network], since they could also grow untenable large
+			cgroupMetrics.Rdma.Reset()
+			cgroupMetrics.Network = []*cgroup1stats.NetworkStat{}
 			properties.Metrics = cgroupMetrics
+		default:
+			log.G(ctx).WithField("propertyType", requestedProperty).Warn("unknown or empty property type")
 		}
 	}
 

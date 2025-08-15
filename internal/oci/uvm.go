@@ -9,13 +9,14 @@ import (
 	"strconv"
 
 	runhcsopts "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sirupsen/logrus"
+
 	iannotations "github.com/Microsoft/hcsshim/internal/annotations"
 	"github.com/Microsoft/hcsshim/internal/devices"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/uvm"
-	"github.com/Microsoft/hcsshim/pkg/annotations"
-	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/sirupsen/logrus"
 )
 
 // UVM specific annotation parsing
@@ -267,8 +268,10 @@ func specToUVMCreateOptionsCommon(ctx context.Context, opts *uvm.Options, s *spe
 	opts.ProcessDumpLocation = ParseAnnotationsString(s.Annotations, annotations.ContainerProcessDumpLocation, opts.ProcessDumpLocation)
 	opts.NoWritableFileShares = ParseAnnotationsBool(ctx, s.Annotations, annotations.DisableWritableFileShares, opts.NoWritableFileShares)
 	opts.DumpDirectoryPath = ParseAnnotationsString(s.Annotations, annotations.DumpDirectoryPath, opts.DumpDirectoryPath)
+
+	// NUMA settings
 	opts.MaxProcessorsPerNumaNode = ParseAnnotationsUint32(ctx, s.Annotations, annotations.NumaMaximumProcessorsPerNode, opts.MaxProcessorsPerNumaNode)
-	opts.MaxSizePerNode = ParseAnnotationsUint64(ctx, s.Annotations, annotations.NumaMaximumSizePerNode, opts.MaxSizePerNode)
+	opts.MaxMemorySizePerNumaNode = ParseAnnotationsUint64(ctx, s.Annotations, annotations.NumaMaximumMemorySizePerNode, opts.MaxMemorySizePerNumaNode)
 	opts.PreferredPhysicalNumaNodes = ParseAnnotationCommaSeparatedUint32(ctx, s.Annotations, annotations.NumaPreferredPhysicalNodes,
 		opts.PreferredPhysicalNumaNodes)
 	opts.NumaMappedPhysicalNodes = ParseAnnotationCommaSeparatedUint32(ctx, s.Annotations, annotations.NumaMappedPhysicalNodes,
@@ -277,6 +280,7 @@ func specToUVMCreateOptionsCommon(ctx context.Context, opts *uvm.Options, s *spe
 		opts.NumaProcessorCounts)
 	opts.NumaMemoryBlocksCounts = ParseAnnotationCommaSeparatedUint64(ctx, s.Annotations, annotations.NumaCountOfMemoryBlocks,
 		opts.NumaMemoryBlocksCounts)
+
 	maps.Copy(opts.AdditionalHyperVConfig, parseHVSocketServiceTable(ctx, s.Annotations))
 }
 

@@ -20,7 +20,7 @@ import (
 	"go.opencensus.io/trace"
 
 	"github.com/Microsoft/hcsshim/internal/copyfile"
-	"github.com/Microsoft/hcsshim/internal/gcs"
+	"github.com/Microsoft/hcsshim/internal/gcs/prot"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/logfields"
@@ -115,8 +115,6 @@ type OptionsLCOW struct {
 	KernelDirect            bool                 // Skip UEFI and boot directly to `kernel`
 	RootFSFile              string               // Filename under `BootFilesPath` for the UVMs root file system. Defaults to `InitrdFile`
 	KernelBootOptions       string               // Additional boot options for the kernel
-	EnableGraphicsConsole   bool                 // If true, enable a graphics console for the utility VM
-	ConsolePipe             string               // The named pipe path to use for the serial console.  eg \\.\pipe\vmpipe
 	UseGuestConnection      bool                 // Whether the HCS should connect to the UVM's GCS. Defaults to true
 	ExecCommandLine         string               // The command line to exec from init. Defaults to GCS
 	ForwardStdout           bool                 // Whether stdout will be forwarded from the executed program. Defaults to false
@@ -164,8 +162,6 @@ func NewDefaultOptionsLCOW(id, owner string) *OptionsLCOW {
 		KernelDirect:            kernelDirectSupported,
 		RootFSFile:              InitrdFile,
 		KernelBootOptions:       "",
-		EnableGraphicsConsole:   false,
-		ConsolePipe:             "",
 		UseGuestConnection:      true,
 		ExecCommandLine:         fmt.Sprintf("/bin/gcs -v4 -log-format json -loglevel %s", logrus.StandardLogger().Level.String()),
 		ForwardStdout:           false,
@@ -442,7 +438,7 @@ func makeLCOWVMGSDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ 
 	//		entropyVsockPort - 1 is the entropy port,
 	//		linuxLogVsockPort - 109 used by vsockexec to log stdout/stderr logging,
 	//		0x40000000 + 1 (LinuxGcsVsockPort + 1) is the bridge (see guestconnectiuon.go)
-	hvSockets := []uint32{entropyVsockPort, linuxLogVsockPort, gcs.LinuxGcsVsockPort, gcs.LinuxGcsVsockPort + 1}
+	hvSockets := []uint32{entropyVsockPort, linuxLogVsockPort, prot.LinuxGcsVsockPort, prot.LinuxGcsVsockPort + 1}
 	hvSockets = append(hvSockets, opts.ExtraVSockPorts...)
 	for _, whichSocket := range hvSockets {
 		key := winio.VsockServiceID(whichSocket).String()
@@ -600,7 +596,7 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 		return nil, err
 	}
 
-	numa, numaProcessors, err := prepareVNumaTopology(opts.Options)
+	numa, numaProcessors, err := prepareVNumaTopology(ctx, opts.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -799,6 +795,10 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 		}
 	}
 
+	// Explicitly disable virtio_vsock_init, to make sure that we use hv_sock transport. For kernels built without
+	// virtio-vsock this is a no-op.
+	kernelArgs += " initcall_blacklist=virtio_vsock_init"
+
 	vmDebugging := false
 	if opts.ConsolePipe != "" {
 		vmDebugging = true
@@ -988,7 +988,7 @@ func CreateLCOW(ctx context.Context, opts *OptionsLCOW) (_ *UtilityVM, err error
 
 	if opts.UseGuestConnection {
 		log.G(ctx).WithField("vmID", uvm.runtimeID).Debug("Using external GCS bridge")
-		l, err := uvm.listenVsock(gcs.LinuxGcsVsockPort)
+		l, err := uvm.listenVsock(prot.LinuxGcsVsockPort)
 		if err != nil {
 			return nil, err
 		}
