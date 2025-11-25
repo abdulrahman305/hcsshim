@@ -12,6 +12,7 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
+	"github.com/Microsoft/go-winio/vhd"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/trace"
@@ -31,11 +32,24 @@ import (
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 )
 
+var (
+	// A predefined GUID for UtilityVMs to identify a scratch VHD that is completely empty/unformatted.
+	// This GUID is set in the metadata of the VHD and thus can be reliably used to identify the disk.
+	// a7b3c5d1-4e2f-4a8b-9c6d-1e3f5a7b9c2d
+	unformattedScratchIdentifier = &guid.GUID{
+		Data1: 0xa7b3c5d1,
+		Data2: 0x4e2f,
+		Data3: 0x4a8b,
+		Data4: [8]byte{0x9c, 0x6d, 0x1e, 0x3f, 0x5a, 0x7b, 0x9c, 0x2d},
+	}
+)
+
 type ConfidentialWCOWOptions struct {
 	GuestStateFilePath     string // The vmgs file path
 	SecurityPolicyEnabled  bool   // Set when there is a security policy to apply on actual SNP hardware, use this rathen than checking the string length
 	SecurityPolicy         string // Optional security policy
 	SecurityPolicyEnforcer string // Set which security policy enforcer to use (open door or rego). This allows for better fallback mechanic.
+	UVMReferenceInfoFile   string // Path to the file that contains the signed UVM measurements
 
 	/* Below options are only included for testing/debugging purposes - shouldn't be used in regular scenarios */
 	IsolationType      string
@@ -59,6 +73,10 @@ type OptionsWCOW struct {
 
 	// AdditionalRegistryKeys are Registry keys and their values to additionally add to the uVM.
 	AdditionalRegistryKeys []hcsschema.RegistryValue
+
+	OutputHandlerCreator OutputHandlerCreator // Creates an [OutputHandler] that controls how output received over HVSocket from the UVM is handled. Defaults to parsing output as ETW Log events
+	LogSources           string               // ETW providers to be set for the logging service
+	ForwardLogs          bool                 // Whether to forward logs to the host or not
 }
 
 func defaultConfidentialWCOWOSBootFilesPath() string {
@@ -77,6 +95,10 @@ func GetDefaultConfidentialEFIPath() string {
 	return filepath.Join(defaultConfidentialWCOWOSBootFilesPath(), "boot.vhd")
 }
 
+func GetDefaultReferenceInfoFilePath() string {
+	return filepath.Join(defaultConfidentialWCOWOSBootFilesPath(), "reference_info.cose")
+}
+
 // NewDefaultOptionsWCOW creates the default options for a bootable version of
 // WCOW. The caller `MUST` set the `BootFiles` on the returned value.
 //
@@ -89,6 +111,9 @@ func NewDefaultOptionsWCOW(id, owner string) *OptionsWCOW {
 		Options:                 newDefaultOptions(id, owner),
 		AdditionalRegistryKeys:  []hcsschema.RegistryValue{},
 		ConfidentialWCOWOptions: &ConfidentialWCOWOptions{},
+		OutputHandlerCreator:    parseLogrus,
+		ForwardLogs:             true, // Default to true for WCOW, and set to false for CWCOW in internal/oci/uvm.go SpecToUVMCreateOpts
+		LogSources:              "",
 	}
 }
 
@@ -259,6 +284,14 @@ func prepareCommonConfigDoc(ctx context.Context, uvm *UtilityVM, opts *OptionsWC
 	}
 
 	maps.Copy(doc.VirtualMachine.Devices.HvSocket.HvSocketConfig.ServiceTable, opts.AdditionalHyperVConfig)
+	if opts.ForwardLogs {
+		key := prot.WindowsLoggingHvsockServiceID.String()
+		doc.VirtualMachine.Devices.HvSocket.HvSocketConfig.ServiceTable[key] = hcsschema.HvSocketServiceConfig{
+			AllowWildcardBinds:        true,
+			BindSecurityDescriptor:    "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+			ConnectSecurityDescriptor: "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+		}
+	}
 
 	// Handle StorageQoS if set
 	if opts.StorageQoSBandwidthMaximum > 0 || opts.StorageQoSIopsMaximum > 0 {
@@ -382,8 +415,9 @@ func prepareSecurityConfigDoc(ctx context.Context, uvm *UtilityVM, opts *Options
 	}
 
 	doc.SchemaVersion = schemaversion.SchemaV25()
+	// VM Version 12 is the min version that supports the various SNP features.
 	doc.VirtualMachine.Version = &hcsschema.Version{
-		Major: 11,
+		Major: 12,
 		Minor: 0,
 	}
 
@@ -404,6 +438,10 @@ func prepareSecurityConfigDoc(ctx context.Context, uvm *UtilityVM, opts *Options
 
 	if err := wclayer.GrantVmAccess(ctx, uvm.id, opts.BootFiles.BlockCIMFiles.ScratchVHDPath); err != nil {
 		return nil, errors.Wrap(err, "failed to grant vm access to scratch VHD")
+	}
+
+	if err = vhd.SetVirtualDiskIdentifier(opts.BootFiles.BlockCIMFiles.ScratchVHDPath, *unformattedScratchIdentifier); err != nil {
+		return nil, fmt.Errorf("set scratch VHD identifier: %w", err)
 	}
 
 	// boot depends on scratch being attached at LUN 0, it MUST ALWAYS remain at LUN 0
@@ -507,6 +545,8 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 		noWritableFileShares:    opts.NoWritableFileShares,
 		createOpts:              opts,
 		blockCIMMounts:          make(map[string]*UVMMountedBlockCIMs),
+		logSources:              opts.LogSources,
+		forwardLogs:             opts.ForwardLogs,
 	}
 
 	defer func() {
@@ -544,6 +584,17 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 	err = uvm.create(ctx, doc)
 	if err != nil {
 		return nil, fmt.Errorf("error while creating the compute system: %w", err)
+	}
+
+	if opts.ForwardLogs {
+		// Create a socket that the executed program can send to. This is usually
+		// used by Log Forward Service to send log data.
+		uvm.outputHandler = opts.OutputHandlerCreator(opts.Options)
+		uvm.outputProcessingDone = make(chan struct{})
+		uvm.outputListener, err = winio.ListenHvsock(&winio.HvsockAddr{
+			VMID:      uvm.RuntimeID(),
+			ServiceID: prot.WindowsLoggingHvsockServiceID,
+		})
 	}
 
 	gcsServiceID := prot.WindowsGcsHvsockServiceID

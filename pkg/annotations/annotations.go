@@ -105,6 +105,48 @@ const (
 
 	// LCOWPrivileged is used to specify that the container should be run in privileged mode.
 	LCOWPrivileged = "io.microsoft.virtualmachine.lcow.privileged"
+
+	// LCOWTeeLogPath specifies a path in the Linux uVM to write container's stdio to,
+	// in addition to the usual vsock pipes.
+	//
+	// Functionally, it is similar to `LogDirectory` and `LogPath` for CRI, but within the guest
+	// rather than on the host.
+	//
+	// See [LCOWTeeLogDirMount] for more info.
+	LCOWTeeLogPath = "io.microsoft.container.lcow.tee-log-path"
+
+	// LCOWLogPathMount is the destination to mount the log directory containing files specified
+	// by the [LCOWTeeLogPath] annotation in order to make them available within the container.
+	// The log directory is backed by the sandbox (pause container) scratch VHD, and can
+	// be considered a special case sandbox mount.
+	//
+	// For example, if container A has the annotation:
+	//
+	// 	"io.microsoft.container.lcow.tee-log-path" = "dir/a.logs"
+	//
+	// And container B has the annotation:
+	//
+	// 	"io.microsoft.container.lcow.tee-log-dir-mount" = "var/logs/containers"
+	//
+	// Then container B will be able to read the logs written to by container A at the path:
+	//
+	// 	/var/logs/containers/dir/a.logs
+	LCOWTeeLogDirMount = "io.microsoft.container.lcow.tee-log-dir-mount"
+)
+
+// LCOW multipod annotations enables multipod and warmpooling.
+const (
+	// SkipPodNetworking is the annotation to skip networking setup for the pod.
+	// This prevents errors from being raised when the pod is created without endpoints. Boolean.
+	SkipPodNetworking = "io.microsoft.cri.skip-pod-networking"
+
+	// TenantSandboxID is the annotation to specify the ID of an existing tenant sandbox
+	// to use for the pod sandbox. If present, the pod will join the specified tenant sandbox. String.
+	TenantSandboxID = "io.microsoft.cri.tenant-sandbox-id"
+
+	// VirtualPodID is the annotation to specify the pod ID not associated with a shim
+	// that a container should be placed in. This is used for multipod scenarios. String.
+	VirtualPodID = "io.microsoft.cri.virtual-pod-id"
 )
 
 // LCOW integrity protection and confidential container annotations.
@@ -400,6 +442,36 @@ const (
 
 	// VSMBNoDirectMap specifies that no direct mapping should be used for any VSMBs added to the UVM.
 	VSMBNoDirectMap = "io.microsoft.virtualmachine.wcow.virtualSMB.nodirectmap"
+
+	// LogSources specifies the ETW providers to be set for the logging service as a base64-encoded JSON string.
+	//
+	// For example:
+	//
+	//	{
+	//	  "logConfig": {
+	//	    "sources": [
+	//	      {
+	//	        "type": "ETW",
+	//	        "providers": [
+	//	          {
+	//	            "providerGuid": "80CE50DE-D264-4581-950D-ABADEEE0D340",
+	//	            "providerName": "Microsoft.Windows.HyperV.Compute",
+	//	            "level": "Information"
+	//	          }
+	//	        ]
+	//	      }
+	//	    ]
+	//	  }
+	//	}
+	//
+	// Would be encoded as:
+	//
+	// 	"io.microsoft.virtualmachine.wcow.logsources" =
+	// 		"eyJsb2dDb25maWciOnsic291cmNlcyI6W3sidHlwZSI6IkVUVyIsInByb3ZpZGVycyI6W3sicHJvdmlkZXJHdWlkIjoiODBDRTUwREUtRDI2NC00NTgxLTk1MEQtQUJBREVFRTBEMzQwIiwicHJvdmlkZXJOYW1lIjoiTWljcm9zb2Z0LldpbmRvd3MuSHlwZXJWLkNvbXB1dGUiLCJsZXZlbCI6IkluZm9ybWF0aW9uIn1dfV19fQ=="
+	LogSources = "io.microsoft.virtualmachine.wcow.logsources"
+
+	// ForwardLogs specifies whether to forward logs to the host or not.
+	ForwardLogs = "io.microsoft.virtualmachine.wcow.forwardlogs"
 )
 
 // LCOW uVM annotations.

@@ -248,6 +248,7 @@ func handleWCOWSecurityPolicy(ctx context.Context, a map[string]string, wopts *u
 	wopts.SecurityPolicyEnforcer = ParseAnnotationsString(a, annotations.WCOWSecurityPolicyEnforcer, wopts.SecurityPolicyEnforcer)
 	wopts.DisableSecureBoot = ParseAnnotationsBool(ctx, a, annotations.WCOWDisableSecureBoot, false)
 	wopts.GuestStateFilePath = ParseAnnotationsString(a, annotations.WCOWGuestStateFile, uvm.GetDefaultConfidentialVMGSPath())
+	wopts.UVMReferenceInfoFile = ParseAnnotationsString(a, annotations.WCOWReferenceInfoFile, uvm.GetDefaultReferenceInfoFilePath())
 	wopts.IsolationType = "SecureNestedPaging"
 	if noSecurityHardware := ParseAnnotationsBool(ctx, a, annotations.NoSecurityHardware, false); noSecurityHardware {
 		wopts.IsolationType = "GuestStateOnly"
@@ -318,6 +319,7 @@ func specToUVMCreateOptionsCommon(ctx context.Context, opts *uvm.Options, s *spe
 	opts.ProcessDumpLocation = ParseAnnotationsString(s.Annotations, annotations.ContainerProcessDumpLocation, opts.ProcessDumpLocation)
 	opts.NoWritableFileShares = ParseAnnotationsBool(ctx, s.Annotations, annotations.DisableWritableFileShares, opts.NoWritableFileShares)
 	opts.DumpDirectoryPath = ParseAnnotationsString(s.Annotations, annotations.DumpDirectoryPath, opts.DumpDirectoryPath)
+	opts.ConsolePipe = ParseAnnotationsString(s.Annotations, iannotations.UVMConsolePipe, opts.ConsolePipe)
 
 	// NUMA settings
 	opts.MaxProcessorsPerNumaNode = ParseAnnotationsUint32(ctx, s.Annotations, annotations.NumaMaximumProcessorsPerNode, opts.MaxProcessorsPerNumaNode)
@@ -330,7 +332,6 @@ func specToUVMCreateOptionsCommon(ctx context.Context, opts *uvm.Options, s *spe
 		opts.NumaProcessorCounts)
 	opts.NumaMemoryBlocksCounts = ParseAnnotationCommaSeparatedUint64(ctx, s.Annotations, annotations.NumaCountOfMemoryBlocks,
 		opts.NumaMemoryBlocksCounts)
-	opts.ConsolePipe = ParseAnnotationsString(s.Annotations, iannotations.UVMConsolePipe, opts.ConsolePipe)
 
 	maps.Copy(opts.AdditionalHyperVConfig, parseHVSocketServiceTable(ctx, s.Annotations))
 
@@ -377,6 +378,7 @@ func SpecToUVMCreateOpts(ctx context.Context, s *specs.Spec, id, owner string) (
 		lopts.UVMReferenceInfoFile = ParseAnnotationsString(s.Annotations, annotations.LCOWReferenceInfoFile, lopts.UVMReferenceInfoFile)
 		lopts.KernelBootOptions = ParseAnnotationsString(s.Annotations, annotations.KernelBootOptions, lopts.KernelBootOptions)
 		lopts.DisableTimeSyncService = ParseAnnotationsBool(ctx, s.Annotations, annotations.DisableLCOWTimeSyncService, lopts.DisableTimeSyncService)
+		lopts.WritableOverlayDirs = ParseAnnotationsBool(ctx, s.Annotations, iannotations.WritableOverlayDirs, lopts.WritableOverlayDirs)
 		handleAnnotationPreferredRootFSType(ctx, s.Annotations, lopts)
 		handleAnnotationKernelDirectBoot(ctx, s.Annotations, lopts)
 		handleAnnotationFullyPhysicallyBacked(ctx, s.Annotations, lopts)
@@ -416,7 +418,12 @@ func SpecToUVMCreateOpts(ctx context.Context, s *specs.Spec, id, owner string) (
 		if err := handleWCOWSecurityPolicy(ctx, s.Annotations, wopts); err != nil {
 			return nil, err
 		}
-
+		// If security policy is enable, wopts.ForwardLogs default value should be false
+		if wopts.SecurityPolicyEnabled {
+			wopts.ForwardLogs = false
+		}
+		wopts.LogSources = ParseAnnotationsString(s.Annotations, annotations.LogSources, wopts.LogSources)
+		wopts.ForwardLogs = ParseAnnotationsBool(ctx, s.Annotations, annotations.ForwardLogs, wopts.ForwardLogs)
 		return wopts, nil
 	}
 	return nil, errors.New("cannot create UVM opts spec is not LCOW or WCOW")
